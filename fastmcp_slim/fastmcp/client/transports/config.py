@@ -53,6 +53,27 @@ def config_entry_timeout_seconds(config: MCPServerTypes) -> tuple[bool, float | 
     return (True, None if seconds == 0 else seconds)
 
 
+def frontend_timeout_seconds(
+    aggregate: float | None,
+    entries,
+) -> float | None:
+    """Frontend session timeout when config entries set their own timeout.
+
+    The frontend session fronts every backend leg: a stale aggregate default
+    would kill a lengthened/disabled entry override before the backend's own
+    limit applies. When no entry sets a timeout the aggregate is untouched;
+    otherwise the frontend allows the largest configured value (or nothing,
+    when the aggregate is disabled or any entry disables its leg — backend
+    legs still enforce their own limits).
+    """
+    sets = [s for e in entries for s in [config_entry_timeout_seconds(e)] if s[0]]
+    if not sets:
+        return aggregate
+    if aggregate is None or any(s is None for _, s in sets):
+        return None
+    return max([aggregate] + [s for _, s in sets])
+
+
 class MCPConfigTransport(ClientTransport):
     """Transport for connecting to one or more MCP servers defined in an MCPConfig.
 
@@ -231,7 +252,14 @@ class MCPConfigTransport(ClientTransport):
                 )
 
             async with FastMCPTransport(mcp=composite).connect_session(
-                transport_options=transport_options, **session_kwargs
+                transport_options=transport_options,
+                **{
+                    **session_kwargs,
+                    "read_timeout_seconds": frontend_timeout_seconds(
+                        session_kwargs.get("read_timeout_seconds"),
+                        self.config.mcpServers.values(),
+                    ),
+                },
             ) as session:
                 yield session
         finally:
